@@ -23,13 +23,7 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 # Include sub-projects.
-set(SFML_BUILD_AUDIO FALSE)
-set(SFML_BUILD_GRAPHICS FALSE)
-set(SFML_BUILD_WINDOW FALSE)
-add_subdirectory(SFML) 
-
 add_subdirectory(main)
 add_subdirectory(DataStream)
 add_subdirectory(BT)
 add_subdirectory(OBEX)
-add_subdirectory(StreamToIP)
