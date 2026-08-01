@@ -8,6 +8,6 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
 endif()
 
-target_link_libraries(${PROJECT_NAME} BT OBEX StreamToIP)
+target_link_libraries(${PROJECT_NAME} BT OBEX)
 
 target_include_directories(${PROJECT_NAME} PUBLIC ".")
