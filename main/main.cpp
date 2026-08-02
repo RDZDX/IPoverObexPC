@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <pty.h>
+#include <termios.h>
 #include <BTSockListener.h>
 #include <BTAdapter.h>
 #include <OBEXServer.h>
@@ -17,6 +18,11 @@
 
 
 uint16_t obex_id = 0x1105;
+
+// Maximum bytes to send to the phone per chunk.
+// The phone's OBEX receive buffer is 64KB but its timer reads only 100 bytes
+// every 33ms (~3000 bytes/sec). Keep chunks small to avoid overwhelming it.
+static const size_t MAX_CHUNK = 64;
 
 void worker(BTSock btsocks, BTSock btsockc) {
 	auto mac = btsocks.getRemoteAddress().toString();
@@ -31,15 +37,11 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	OBEXc.reader.sdra_connect(&btsockc);
 	OBEXc.writer.sdwa_connect(&btsockc);
 
-	// OBEXServer decodes incoming bytes and writes them into stream_writer (a StreamAgent).
-	// We provide the Stream that stream_writer writes into, so we can read them out.
 	DS::Stream incoming;
-	OBEXs.stream_writer.sdsa_connect(&incoming);  // OBEXServer → incoming (we read)
+	OBEXs.stream_writer.sdsa_connect(&incoming);
 
-	// OBEXClient reads bytes to encode from stream_reader (a Stream).
-	// We connect a StreamAgent to that Stream so we can write shell output into it.
 	DS::StreamAgent outgoing;
-	outgoing.sdsa_connect(&OBEXc.stream_reader);  // outgoing (we write) → OBEXClient
+	outgoing.sdsa_connect(&OBEXc.stream_reader);
 
 	OBEXc.connet();
 	OBEXc.initPutStream("terminal.txt", 0x7FFFFFFF);
@@ -47,29 +49,35 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	OBEXs.run();
 	OBEXc.run();
 
-	// Spawn a login shell connected to a PTY so bash thinks it has a real terminal.
-	// This prevents bash from emitting raw terminal sequences like \r cursor-moves
-	// that confuse the phone's console parser and cause crashes.
+	// Spawn a login shell connected to a PTY.
 	int master_fd = -1;
 	pid_t pid = forkpty(&master_fd, nullptr, nullptr, nullptr);
 
 	if (pid == 0) {
-		// Child: we are already connected to the slave PTY side.
-		// Change to home directory
+		// Child: connected to the slave PTY side.
 		const char* home = getenv("HOME");
 		if (home)
 			chdir(home);
 
-		// Disable echo on the PTY so typed commands don't get echoed back
-		// (the phone handles its own echo display).
-		// We can't easily do this before exec, so start a non-interactive shell.
-		// Use --noediting to avoid readline escape sequences.
+		// Use --noediting to suppress readline ANSI escape sequences.
+		// TERM=dumb disables colour and cursor-movement sequences in most programs.
+		setenv("TERM", "dumb", 1);
+		setenv("BASH_ENV", "", 1);
+
 		execl("/bin/bash", "bash", "--login", "--noediting", nullptr);
 		execl("/bin/sh", "sh", "-l", nullptr);
 		_exit(1);
 	}
 
-	// Parent: master_fd is the PTY master — read shell output, write shell input.
+	// Parent: disable echo on the PTY master so typed characters don't
+	// get echoed back to the phone (the phone shows them itself).
+	{
+		struct termios t;
+		if (tcgetattr(master_fd, &t) == 0) {
+			t.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
+			tcsetattr(master_fd, TCSANOW, &t);
+		}
+	}
 
 	// Forward incoming OBEX bytes (phone → PC) to shell PTY,
 	// stripping \r so that CR+LF line endings become plain LF.
@@ -78,7 +86,6 @@ void worker(BTSock btsocks, BTSock btsockc) {
 			auto buf = incoming.readAll(DS::BlockingPartial);
 			if (buf.empty())
 				break;
-			// Strip \r characters before forwarding to the shell
 			std::vector<uint8_t> clean;
 			clean.reserve(buf.size());
 			for (uint8_t c : buf) {
@@ -88,17 +95,20 @@ void worker(BTSock btsocks, BTSock btsockc) {
 			if (!clean.empty())
 				write(master_fd, clean.data(), clean.size());
 		}
-		// Signal shell stdin EOF
 		close(master_fd);
 	});
 
-	// Forward PTY output (shell stdout+stderr) → phone via OBEX outgoing stream.
-	// The PTY converts \n to \r\n automatically, so the phone gets proper line endings.
+	// Forward PTY output (shell stdout+stderr) → phone via OBEX.
+	// Send at most MAX_CHUNK bytes at a time, then yield, so the phone's
+	// 33ms timer loop can drain the receive buffer before more data arrives.
 	std::thread outgoing_thr([&]() {
-		char rbuf[1024];
+		char rbuf[MAX_CHUNK];
 		ssize_t n;
 		while ((n = read(master_fd, rbuf, sizeof(rbuf))) > 0) {
 			outgoing.write(rbuf, n);
+			// Pace output: give the phone ~1 timer tick (33ms) to process
+			// each chunk before sending more.
+			std::this_thread::sleep_for(std::chrono::milliseconds(35));
 		}
 		outgoing.sdsa_close();
 	});
