@@ -7,6 +7,7 @@
 #include <chrono>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <pty.h>
 #include <BTSockListener.h>
 #include <BTAdapter.h>
 #include <OBEXServer.h>
@@ -46,40 +47,31 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	OBEXs.run();
 	OBEXc.run();
 
-	// Spawn a login shell with stdin/stdout/stderr connected to pipes
-	int stdin_pipe[2];   // [0]=read end (shell stdin), [1]=write end (we write)
-	int stdout_pipe[2];  // [0]=read end (we read),     [1]=write end (shell stdout+stderr)
+	// Spawn a login shell connected to a PTY so bash thinks it has a real terminal.
+	// This prevents bash from emitting raw terminal sequences like \r cursor-moves
+	// that confuse the phone's console parser and cause crashes.
+	int master_fd = -1;
+	pid_t pid = forkpty(&master_fd, nullptr, nullptr, nullptr);
 
-	pipe(stdin_pipe);
-	pipe(stdout_pipe);
-
-	pid_t pid = fork();
 	if (pid == 0) {
-		// Child: wire up pipes and exec shell
-		dup2(stdin_pipe[0], STDIN_FILENO);
-		dup2(stdout_pipe[1], STDOUT_FILENO);
-		dup2(stdout_pipe[1], STDERR_FILENO);
-		close(stdin_pipe[0]);
-		close(stdin_pipe[1]);
-		close(stdout_pipe[0]);
-		close(stdout_pipe[1]);
-
+		// Child: we are already connected to the slave PTY side.
 		// Change to home directory
 		const char* home = getenv("HOME");
 		if (home)
 			chdir(home);
 
-		// Try bash first, fall back to sh
-		execl("/bin/bash", "bash", "--login", nullptr);
+		// Disable echo on the PTY so typed commands don't get echoed back
+		// (the phone handles its own echo display).
+		// We can't easily do this before exec, so start a non-interactive shell.
+		// Use --noediting to avoid readline escape sequences.
+		execl("/bin/bash", "bash", "--login", "--noediting", nullptr);
 		execl("/bin/sh", "sh", "-l", nullptr);
 		_exit(1);
 	}
 
-	// Parent: close unused pipe ends
-	close(stdin_pipe[0]);
-	close(stdout_pipe[1]);
+	// Parent: master_fd is the PTY master — read shell output, write shell input.
 
-	// Forward incoming OBEX bytes (phone → PC) to shell stdin,
+	// Forward incoming OBEX bytes (phone → PC) to shell PTY,
 	// stripping \r so that CR+LF line endings become plain LF.
 	std::thread incoming_thr([&]() {
 		while (true) {
@@ -94,19 +86,20 @@ void worker(BTSock btsocks, BTSock btsockc) {
 					clean.push_back(c);
 			}
 			if (!clean.empty())
-				write(stdin_pipe[1], clean.data(), clean.size());
+				write(master_fd, clean.data(), clean.size());
 		}
-		close(stdin_pipe[1]);
+		// Signal shell stdin EOF
+		close(master_fd);
 	});
 
-	// Forward shell stdout+stderr (PC → phone) via OBEX outgoing stream
+	// Forward PTY output (shell stdout+stderr) → phone via OBEX outgoing stream.
+	// The PTY converts \n to \r\n automatically, so the phone gets proper line endings.
 	std::thread outgoing_thr([&]() {
 		char rbuf[1024];
 		ssize_t n;
-		while ((n = read(stdout_pipe[0], rbuf, sizeof(rbuf))) > 0) {
+		while ((n = read(master_fd, rbuf, sizeof(rbuf))) > 0) {
 			outgoing.write(rbuf, n);
 		}
-		close(stdout_pipe[0]);
 		outgoing.sdsa_close();
 	});
 
