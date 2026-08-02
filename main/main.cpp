@@ -5,6 +5,8 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <unistd.h>
+#include <sys/wait.h>
 #include <BTSockListener.h>
 #include <BTAdapter.h>
 #include <OBEXServer.h>
@@ -44,24 +46,58 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	OBEXs.run();
 	OBEXc.run();
 
-	// Forward incoming OBEX stream data (device -> PC) to stdout
+	// Spawn a login shell with stdin/stdout/stderr connected to pipes
+	int stdin_pipe[2];   // write end -> shell stdin
+	int stdout_pipe[2];  // read end <- shell stdout+stderr
+
+	pipe(stdin_pipe);
+	pipe(stdout_pipe);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		// Child: wire up pipes and exec shell
+		dup2(stdin_pipe[0], STDIN_FILENO);
+		dup2(stdout_pipe[1], STDOUT_FILENO);
+		dup2(stdout_pipe[1], STDERR_FILENO);
+		close(stdin_pipe[0]);
+		close(stdin_pipe[1]);
+		close(stdout_pipe[0]);
+		close(stdout_pipe[1]);
+
+		// Change to home directory
+		const char* home = getenv("HOME");
+		if (home)
+			chdir(home);
+
+		// Try bash first, fall back to sh
+		execl("/bin/bash", "bash", "--login", nullptr);
+		execl("/bin/sh", "sh", "-l", nullptr);
+		_exit(1);
+	}
+
+	// Parent: close unused pipe ends
+	close(stdin_pipe[0]);
+	close(stdout_pipe[1]);
+
+	// Forward incoming OBEX bytes (phone -> PC) to shell stdin
 	std::thread incoming_thr([&]() {
 		while (true) {
 			auto buf = incoming.readAll(DS::BlockingPartial);
 			if (buf.empty())
 				break;
-			std::cout.write(reinterpret_cast<const char*>(buf.data()), buf.size());
-			std::cout.flush();
+			write(stdin_pipe[1], buf.data(), buf.size());
 		}
+		close(stdin_pipe[1]);
 	});
 
-	// Forward stdin (PC -> device) via OBEX client stream
+	// Forward shell stdout+stderr (PC -> phone) via OBEX outgoing stream
 	std::thread outgoing_thr([&]() {
-		std::string line;
-		while (std::getline(std::cin, line)) {
-			line += '\n';
-			outgoing.write(line.data(), line.size());
+		char rbuf[1024];
+		ssize_t n;
+		while ((n = read(stdout_pipe[0], rbuf, sizeof(rbuf))) > 0) {
+			outgoing.write(rbuf, n);
 		}
+		close(stdout_pipe[0]);
 		outgoing.sdsa_close();
 	});
 
@@ -74,6 +110,8 @@ void worker(BTSock btsocks, BTSock btsockc) {
 		incoming_thr.join();
 	if (outgoing_thr.joinable())
 		outgoing_thr.join();
+
+	waitpid(pid, nullptr, 0);
 
 	std::cout << "Disconnected: " << mac << '\n';
 }
