@@ -30,15 +30,15 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	OBEXc.reader.sdra_connect(&btsockc);
 	OBEXc.writer.sdwa_connect(&btsockc);
 
-	// Bridge: OBEXServer writes decoded bytes into stream_writer (StreamAgent);
-	// connect a Stream so we can read those bytes out.
+	// OBEXServer decodes incoming bytes and writes them into stream_writer (a StreamAgent).
+	// We provide the Stream that stream_writer writes into, so we can read them out.
 	DS::Stream incoming;
-	incoming.sds_connect(&OBEXs.stream_writer);
+	OBEXs.stream_writer.sdsa_connect(&incoming);  // OBEXServer → incoming (we read)
 
-	// Bridge: OBEXClient reads bytes to send from stream_reader (Stream);
-	// connect a StreamAgent so we can write bytes into it.
+	// OBEXClient reads bytes to encode from stream_reader (a Stream).
+	// We connect a StreamAgent to that Stream so we can write shell output into it.
 	DS::StreamAgent outgoing;
-	outgoing.sdsa_connect(&OBEXc.stream_reader);
+	outgoing.sdsa_connect(&OBEXc.stream_reader);  // outgoing (we write) → OBEXClient
 
 	OBEXc.connet();
 	OBEXc.initPutStream("terminal.txt", 0x7FFFFFFF);
@@ -47,8 +47,8 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	OBEXc.run();
 
 	// Spawn a login shell with stdin/stdout/stderr connected to pipes
-	int stdin_pipe[2];   // write end -> shell stdin
-	int stdout_pipe[2];  // read end <- shell stdout+stderr
+	int stdin_pipe[2];   // [0]=read end (shell stdin), [1]=write end (we write)
+	int stdout_pipe[2];  // [0]=read end (we read),     [1]=write end (shell stdout+stderr)
 
 	pipe(stdin_pipe);
 	pipe(stdout_pipe);
@@ -79,7 +79,7 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	close(stdin_pipe[0]);
 	close(stdout_pipe[1]);
 
-	// Forward incoming OBEX bytes (phone -> PC) to shell stdin,
+	// Forward incoming OBEX bytes (phone → PC) to shell stdin,
 	// stripping \r so that CR+LF line endings become plain LF.
 	std::thread incoming_thr([&]() {
 		while (true) {
@@ -99,7 +99,7 @@ void worker(BTSock btsocks, BTSock btsockc) {
 		close(stdin_pipe[1]);
 	});
 
-	// Forward shell stdout+stderr (PC -> phone) via OBEX outgoing stream
+	// Forward shell stdout+stderr (PC → phone) via OBEX outgoing stream
 	std::thread outgoing_thr([&]() {
 		char rbuf[1024];
 		ssize_t n;
