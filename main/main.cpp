@@ -79,13 +79,22 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	close(stdin_pipe[0]);
 	close(stdout_pipe[1]);
 
-	// Forward incoming OBEX bytes (phone -> PC) to shell stdin
+	// Forward incoming OBEX bytes (phone -> PC) to shell stdin,
+	// stripping \r so that CR+LF line endings become plain LF.
 	std::thread incoming_thr([&]() {
 		while (true) {
 			auto buf = incoming.readAll(DS::BlockingPartial);
 			if (buf.empty())
 				break;
-			write(stdin_pipe[1], buf.data(), buf.size());
+			// Strip \r characters before forwarding to the shell
+			std::vector<uint8_t> clean;
+			clean.reserve(buf.size());
+			for (uint8_t c : buf) {
+				if (c != '\r')
+					clean.push_back(c);
+			}
+			if (!clean.empty())
+				write(stdin_pipe[1], clean.data(), clean.size());
 		}
 		close(stdin_pipe[1]);
 	});
