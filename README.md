@@ -1,4 +1,4 @@
-# IPoverObexPC
+# IPoverObexPC - BT terminal
 
 ## Linux
 You need to register D-Bus service by copying ```IPoverObex.conf``` to ```/etc/dbus-1/system.d/```
