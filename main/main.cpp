@@ -59,8 +59,7 @@ void worker(BTSock btsocks, BTSock btsockc) {
 		if (home)
 			chdir(home);
 
-		// Use --noediting to suppress readline ANSI escape sequences.
-		// TERM=dumb disables colour and cursor-movement sequences in most programs.
+		// TERM=dumb: no ANSI colour or cursor-movement sequences.
 		setenv("TERM", "dumb", 1);
 		setenv("BASH_ENV", "", 1);
 
@@ -69,12 +68,17 @@ void worker(BTSock btsocks, BTSock btsockc) {
 		_exit(1);
 	}
 
-	// Parent: disable echo on the PTY master so typed characters don't
-	// get echoed back to the phone (the phone shows them itself).
+	// Parent: configure the PTY master.
 	{
 		struct termios t;
 		if (tcgetattr(master_fd, &t) == 0) {
+			// Disable echo so typed characters aren't doubled on the phone.
 			t.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
+			// Disable ONLCR (NL→CR+LF translation).
+			// We do our own \n→\r\n conversion before sending to the phone,
+			// so the phone always gets proper CR+LF line endings and blank
+			// Enter (which sends just \n) produces a visible new line.
+			t.c_oflag &= ~ONLCR;
 			tcsetattr(master_fd, TCSANOW, &t);
 		}
 	}
@@ -99,13 +103,23 @@ void worker(BTSock btsocks, BTSock btsockc) {
 	});
 
 	// Forward PTY output (shell stdout+stderr) → phone via OBEX.
-	// Send at most MAX_CHUNK bytes at a time, then yield, so the phone's
-	// 33ms timer loop can drain the receive buffer before more data arrives.
+	// Convert \n → \r\n so the phone's console advances lines correctly,
+	// including after a blank Enter where bash only outputs \n.
+	// Send at most MAX_CHUNK bytes at a time with a 35ms pause to pace output.
 	std::thread outgoing_thr([&]() {
 		char rbuf[MAX_CHUNK];
 		ssize_t n;
 		while ((n = read(master_fd, rbuf, sizeof(rbuf))) > 0) {
-			outgoing.write(rbuf, n);
+			// Expand \n to \r\n before sending to phone.
+			std::vector<char> out;
+			out.reserve(n * 2);
+			for (ssize_t i = 0; i < n; ++i) {
+				if (rbuf[i] == '\n') {
+					out.push_back('\r');
+				}
+				out.push_back(rbuf[i]);
+			}
+			outgoing.write(out.data(), out.size());
 			// Pace output: give the phone ~1 timer tick (33ms) to process
 			// each chunk before sending more.
 			std::this_thread::sleep_for(std::chrono::milliseconds(35));
