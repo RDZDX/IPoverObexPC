@@ -1,0 +1,15 @@
+[Unit]
+Description=IPoverObexPC Bluetooth OBEX Server
+After=bluetooth.service network.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/bin
+ExecStart=/usr/local/bin/IPoverObexPC
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
