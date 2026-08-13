@@ -6,11 +6,11 @@ You need to register D-Bus service by copying ```IPoverObex.conf``` to ```/etc/d
 Also you need to stop obex.service, you can use ```systemctl --user mask obex.service```
 
 
-sudo cp ./IPoverObexPC /usr/local/bin/
-sudo cp ./ipoverobexpc.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable ipoverobexpc
-sudo systemctl start ipoverobexpc
+sudo cp ./IPoverObexPC /usr/local/bin/ \
+sudo cp ./ipoverobexpc.service /etc/systemd/system/ \
+sudo systemctl daemon-reload \
+sudo systemctl enable ipoverobexpc \
+sudo systemctl start ipoverobexpc 
 
 
 ## File
