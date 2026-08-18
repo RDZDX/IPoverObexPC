@@ -12,6 +12,7 @@ sudo systemctl daemon-reload \
 sudo systemctl enable ipoverobexpc \
 sudo systemctl start ipoverobexpc 
 
+Client app: https://github.com/RDZDX/IPoverObexVxp
 
 ## File
 
